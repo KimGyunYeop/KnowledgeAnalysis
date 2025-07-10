@@ -1,0 +1,308 @@
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, GPT2LMHeadModel, GPT2Tokenizer, GPT2Config
+import transformers
+
+from torch.utils.data import DataLoader, Dataset, Subset
+import torch
+
+from tqdm import tqdm
+import numpy as np
+
+import random
+import json
+import os
+
+import argparse
+
+from tqdm import tqdm
+
+ATTRIBUTE_LIST = ["birth_date", "birth_place", "university", "major", "company", "location"]
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train a plain transformer model for knowledge analysis")
+    
+    parser.add_argument("--model_name", type=str, default="gpt2", help="Pretrained model name or path")
+    parser.add_argument("--data_path", type=str, default="data/bio_data_64000_42.json", help="Path to the training data")
+    parser.add_argument("--template_path", type=str, default="bio_templates.json", help="Path to the templates JSON file")
+    parser.add_argument("--output_dir", type=str, default="output/plain_transformer", help="Directory to save the model")
+    parser.add_argument("--num_eval_data", type=int, default=16000, help="Number of evaluation data points")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
+    parser.add_argument("--num_steps", type=int, default=16000, help="Number of training epochs")
+    parser.add_argument("--accumulation_steps", type=int, default=4, help="Number of steps for gradient accumulation")
+    parser.add_argument("--eval_batch_size", type=int, default=32, help="Batch size for evaluation")
+    parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate for the optimizer")
+    parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay for the optimizer")
+    parser.add_argument("--warmup_steps", type=int, default=0, help="Number of warmup steps for the learning rate scheduler")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--fp16", action="store_true", help="Use mixed precision training")
+    parser.add_argument("--logging_steps", type=int, default=50, help="Number of steps between logging")
+    parser.add_argument("--save_steps", type=int, default=500, help="Number of steps between model saves")
+    parser.add_argument("--eval_steps", type=int, default=100, help="Number of steps between evaluations")
+    parser.add_argument("--gpu", type=str, default="0", help="GPU device ID to use for training")
+    
+    # model configuration
+    parser.add_argument("--n_layers", type=int, default=8, help="Number of layers in the transformer model")
+    parser.add_argument("--n_heads", type=int, default=8, help="Number of attention heads in the transformer model")
+    parser.add_argument("--d_model", type=int, default=512, help="Model dimension (residual stream)")
+    parser.add_argument("--d_hidden", type=int, default=2048, help="Hidden dimension of the multi-layer perceptron")
+    parser.add_argument("--key_size", type=int, default=64, help="Dimension of the key and values")
+    parser.add_argument("--sequence_mixer", type=str, default="attention", choices=["attention", "mlp"], help="Which sequence mixing block to use")
+    parser.add_argument("--max_len", type=int, default=512, help="Maximum sequence length for the model")
+    
+    return parser.parse_args()
+
+class RandomBioDataset(Dataset):
+    def __init__(self, data_path, template_path, tokenizer, mode="train"):
+        with open(data_path, 'r') as f:
+            self.data = json.load(f)
+            
+        with open(template_path, 'r') as f:
+            self.templates = json.load(f)
+            
+        self.tokenizer = tokenizer
+        
+        self.len_temp = len(self.data[0]["train_tamplates"]["birth_date_template"])
+        
+        if mode == "train":
+            self.temp_mask = 0
+            self.use_temp_num = sum(self.data[0]["train_tamplates"]["birth_date_template"])
+        elif mode == "test":
+            self.temp_mask = 1
+            self.use_temp_num = self.len_temp - sum(self.data[0]["train_tamplates"]["birth_date_template"])
+            
+        self.name_holder = tokenizer.convert_tokens_to_ids("[X]")
+        self.value_holder = tokenizer.convert_tokens_to_ids("[Y]")
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        name = item['name']
+        
+        shuffled_attributes = ATTRIBUTE_LIST.copy()
+        random.shuffle(shuffled_attributes)
+        
+        attr_values = []
+        use_templates = []
+        for attr in shuffled_attributes:
+            attr_values.append(item[attr])
+            while True:
+                template_index = random.randint(0, self.len_temp - 1)
+                if item["train_tamplates"][f"{attr}_template"][template_index] == self.temp_mask:
+                    use_templates.append(self.templates[f"{attr}_template"][template_index])
+                    break
+                
+        template = " ".join(use_templates)
+        
+        tokens = self.tokenizer(template)
+        # print("before decoded input_ids:", self.tokenizer.convert_ids_to_tokens(tokens.input_ids))
+        
+        name_tokens = self.tokenizer(name, add_special_tokens=False)
+        name_indices = []
+        value_indices = []
+        len_name_tokens = len(name_tokens.input_ids)
+        for value in attr_values:
+            attr_tokens = self.tokenizer(value, add_special_tokens=False)
+            
+            name_index = tokens.input_ids.index(self.name_holder)
+            tokens.input_ids = tokens.input_ids[:name_index] + name_tokens.input_ids + tokens.input_ids[name_index + 1:]
+            tokens.attention_mask = tokens.attention_mask[:name_index] + name_tokens.attention_mask + tokens.attention_mask[name_index + 1:]
+            
+            name_indices.append([name_index, name_index + len_name_tokens])
+            
+            value_index = tokens.input_ids.index(self.value_holder)
+            len_value_tokens = len(attr_tokens.input_ids)
+            tokens.input_ids = tokens.input_ids[:value_index] + attr_tokens.input_ids + tokens.input_ids[value_index + 1:]
+            tokens.attention_mask = tokens.attention_mask[:value_index] + attr_tokens.attention_mask + tokens.attention_mask[value_index + 1:]
+            
+            value_indices.append([value_index, value_index + len_value_tokens])
+        
+        name_mask = torch.zeros(len(tokens.input_ids), dtype=torch.long)
+        value_mask = torch.zeros(len(tokens.input_ids), dtype=torch.long)
+        
+        for start, end in name_indices:
+            name_mask[start:end] = 1
+        
+        for start, end in value_indices:
+            value_mask[start:end] = 1
+            
+        input_ids = torch.tensor(tokens.input_ids, dtype=torch.long)
+        attention_mask = torch.tensor(tokens.attention_mask, dtype=torch.long)
+        
+        # print("after decoded input_ids:", self.tokenizer.convert_ids_to_tokens(input_ids))
+        
+        # print("only name tokens:", self.tokenizer.decode(input_ids[name_mask == 1]))
+        # print("only value tokens:", self.tokenizer.decode(input_ids[value_mask == 1]))
+            
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "name_mask": name_mask, "value_mask": value_mask}
+
+    def collate_fn(self, batch):
+        input_ids = [item["input_ids"] for item in batch]
+        attention_mask = [item["attention_mask"] for item in batch]
+        name_mask = [item["name_mask"] for item in batch]
+        value_mask = [item["value_mask"] for item in batch]
+        
+        input_ids = torch.nn.utils.rnn.pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
+        attention_mask = torch.nn.utils.rnn.pad_sequence(attention_mask, batch_first=True, padding_value=0)
+        name_mask = torch.nn.utils.rnn.pad_sequence(name_mask, batch_first=True, padding_value=0)
+        value_mask = torch.nn.utils.rnn.pad_sequence(value_mask, batch_first=True, padding_value=0)
+        
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "name_mask": name_mask, "value_mask": value_mask}
+    
+def main():
+    args = parse_args()
+    
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed) 
+    
+    total_steps = args.num_steps * args.accumulation_steps
+    
+    # Load tokenizer and model
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    config = AutoConfig.from_pretrained(args.model_name)
+    model = GPT2LMHeadModel(config)
+    
+    
+    tokenizer.pad_token = tokenizer.eos_token  # Set pad token to eos token for GPT-2 compatibility
+    tokenizer.add_special_tokens({"additional_special_tokens":["[X]", "[Y]"]})  # Add special tokens for placeholders
+    model.resize_token_embeddings(len(tokenizer))  # Resize token embeddings to match tokenizer size
+    
+    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    
+    train_dataset = RandomBioDataset(
+        data_path=args.data_path,
+        template_path=args.template_path,
+        tokenizer=tokenizer,
+        mode="train"
+    )
+    test_dataset = RandomBioDataset(
+        data_path=args.data_path,
+        template_path=args.template_path,
+        tokenizer=tokenizer,
+        mode="test"
+    )
+    
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=train_dataset.collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=train_dataset.collate_fn)
+    # only evaluate on 16k samples
+    indices = torch.randperm(len(test_dataset))[:args.num_eval_data]
+    test_loader = DataLoader(Subset(test_dataset, indices), batch_size=args.eval_batch_size, shuffle=False, collate_fn=test_dataset.collate_fn)
+                
+    
+    optimizer = transformers.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    #cosine scheduler
+    scheduler = transformers.get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=args.warmup_steps,
+        num_training_steps=total_steps
+    )
+    
+    # Training loop
+    model.train()
+    
+    logging_train_loss = []
+    logging_train_attr_loss = []
+    logging_test_loss = []
+    logging_test_attr_loss = []
+    
+    loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+    for i in tqdm(range(total_steps)):
+        batch = next(iter(train_loader))
+        if batch is None:
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=train_dataset.collate_fn)
+            batch = next(iter(train_loader))
+            
+        input_ids = batch["input_ids"].to(model.device)
+        attention_mask = batch["attention_mask"].to(model.device)
+        name_mask = batch["name_mask"].to(model.device)
+        value_mask = batch["value_mask"].to(model.device)
+        
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        logits = outputs.logits
+        
+        # Shift logits and input_ids for loss calculation
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = input_ids[..., 1:].contiguous()
+        shift_name_mask = name_mask[..., 1:].contiguous()
+        shift_value_mask = value_mask[..., 1:].contiguous()
+
+        # Calculate loss
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        attr_loss = loss[shift_value_mask.view(-1) == 1]
+        
+        loss = loss.mean() / args.accumulation_steps  # Normalize loss by accumulation steps
+        attr_loss = attr_loss.sum() / (len(ATTRIBUTE_LIST) * args.batch_size)  # Normalize attribute loss
+        
+        loss.backward()
+        
+        if (i + 1) % args.accumulation_steps == 0:
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+        
+        if (i + 1) % args.eval_steps == 0:
+            print(f"Evaluating at step {i+1}...")
+            # Evaluation on test set
+            model.eval()
+            with torch.no_grad():
+                all_test_loss = 0.0
+                all_test_attr_loss = 0.0
+                
+                for test_batch in tqdm(test_loader):
+                    test_input_ids = test_batch["input_ids"].to(model.device)
+                    test_attention_mask = test_batch["attention_mask"].to(model.device)
+                    test_name_mask = test_batch["name_mask"].to(model.device)
+                    test_value_mask = test_batch["value_mask"].to(model.device)
+
+                    test_outputs = model(input_ids=test_input_ids, attention_mask=test_attention_mask)
+                    test_logits = test_outputs.logits
+
+                    shift_test_logits = test_logits[..., :-1, :].contiguous()
+                    shift_test_labels = test_input_ids[..., 1:].contiguous()
+                    shift_test_value_mask = test_value_mask[..., 1:].contiguous()
+
+                    test_loss = loss_fct(shift_test_logits.view(-1, shift_test_logits.size(-1)), shift_test_labels.view(-1))
+                    test_attr_loss = test_loss[shift_test_value_mask.view(-1) == 1]
+                    all_test_loss += test_loss.mean().item()
+                    all_test_attr_loss += test_attr_loss.sum().item() / (len(ATTRIBUTE_LIST) * args.eval_batch_size)
+
+                print(f"Test Loss: {all_test_loss / len(test_loader)}")
+                print(f"Test Attribute Loss: {all_test_attr_loss / len(test_loader)}")
+                logging_test_loss.append(all_test_loss / len(test_loader))
+                logging_test_attr_loss.append(all_test_attr_loss / len(test_loader))
+            model.train()
+        
+        if (i + 1) % args.logging_steps == 0:
+            print(f"Step {i+1}, Loss: {loss.item()}")
+            print(f"Step {i+1}, Attribute Loss: {attr_loss.item()}")
+            logging_train_loss.append(loss.item())
+            logging_train_attr_loss.append(attr_loss.item())
+                
+        if (i + 1) % args.save_steps == 0:
+            model.save_pretrained(os.path.join(args.output_dir, f"model_step_{i+1}"))
+            
+    import matplotlib.pyplot as plt
+    # plotting the training losses
+    plt.figure(figsize=(12, 6))
+    plt.plot(logging_train_loss, label='Train Loss', color='blue')
+    plt.plot(logging_train_attr_loss, label='Train Attribute Loss', color='orange')
+    plt.xlabel('Steps')
+    plt.ylabel('Loss')
+    plt.title('Training Losses')
+    plt.legend()    
+    plt.savefig(os.path.join(args.output_dir, 'training_losses.png'))
+    
+    # plotting the evaluation losses
+    plt.figure(figsize=(12, 6))
+    plt.plot(logging_test_loss, label='Test Loss', color='green')
+    plt.plot(logging_test_attr_loss, label='Test Attribute Loss', color='red')
+    plt.xlabel('Steps')
+    plt.ylabel('Loss')
+    plt.title('Evaluation Losses')
+    plt.legend()    
+    plt.savefig(os.path.join(args.output_dir, 'evaluation_losses.png'))
+    
+main()

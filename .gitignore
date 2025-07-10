@@ -3,3 +3,4 @@
 !bio_templates.json
 *.sh
 raw_dataset/*
+output/*
