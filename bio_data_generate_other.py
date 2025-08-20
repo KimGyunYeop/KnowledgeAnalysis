@@ -5,14 +5,16 @@ import argparse
 import os
 from tqdm import tqdm
 import random
+import json
 
 # argument parser
 def parse_args():
     parser = argparse.ArgumentParser(description="Data Preprocessing for Knowledge Analysis")
     
+    parser.add_argument("--output_dir", type=str, default="data", help="Directory to save the output JSON file")
+    parser.add_argument("--target_file", type=str, default="bio_data_10000_42_other_1764.json", help="Path to the output JSON file")
     parser.add_argument("--data_folder", type=str, default="raw_dataset", help="Path to the input JSON file")
     # parser.add_argument("--num_generate_person", type=int, default=64000, help="Number of data points to generate")
-    parser.add_argument("--num_generate_person", type=int, default=64000, help="Number of data points to generate")
     parser.add_argument("--num_name", type=int, default=900, help="Number of names to generate")
     parser.add_argument("--num_surname", type=int, default=1000, help="Number of surnames to generate")
     parser.add_argument("--num_country", type=int, default=800, help="Number of countries to generate")
@@ -20,7 +22,7 @@ def parse_args():
     parser.add_argument("--num_major", type=int, default=100, help="Number of majors to generate")
     parser.add_argument("--num_company", type=int, default=500, help="Number of companies to generate")
     
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    # parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     
     return parser.parse_args()
 
@@ -30,11 +32,20 @@ def set_seed(seed):
     
 def main():
     args = parse_args()
+    args.num_generate_person = int(args.target_file.split("_")[-2])
+    args.original_seed = int(args.target_file.split("_")[-1].split(".")[0])
+    args.seed = args.original_seed ** 2
     
     os.makedirs("data", exist_ok=True)
     
-    if os.path.exists(os.path.join("data", f"bio_data_{args.num_generate_person}_{args.seed}.json")):
-        print(f"Data file already exists: data/bio_data_{args.num_generate_person}_{args.seed}.json")
+    with open(os.path.join(args.output_dir, f"bio_data_{args.num_generate_person}_{args.original_seed}.json"), "r") as f:
+        original_data = json.load(f)
+        
+        
+    original_name_pool = [person["name"] for person in original_data]
+    
+    if os.path.exists(os.path.join(args.output_dir, f"bio_data_{args.num_generate_person}_{args.seed}_other.json")):
+        print(f"Data file already exists: data/bio_data_{args.num_generate_person}_{args.seed}_other.json")
         return
     
     set_seed(args.seed)
@@ -128,7 +139,7 @@ def main():
             
             name = f"{first_name} {middle_name} {last_name}"
             
-            if name not in full_name_pool:
+            if name not in full_name_pool and name not in original_name_pool:
                 full_name_pool.append(name)
                 break
         
@@ -169,9 +180,8 @@ def main():
         bio_dataset.append(one_bio)
     
     # Save the generated dataset to a JSON file
-    output_file = os.path.join("data", f"bio_data_{args.num_generate_person}_{args.seed}.json")
+    output_file = os.path.join("data", f"bio_data_{args.num_generate_person}_{args.original_seed}_other_{args.seed}.json")
     with open(output_file, "w") as f:
-        import json
         json.dump(bio_dataset, f, indent=4) 
     
 
