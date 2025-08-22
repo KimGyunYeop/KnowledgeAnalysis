@@ -1,10 +1,12 @@
 #/bin/bash
 
+export CUDA_VISIBLE_DEVICES=0,1
 
 python train.py \
     --data_path data/bio_data_50000_42.json \
     --template_path bio_templates.json \
-    --num_steps 100000 \
+    --num_steps 10000 \
+    --eval_steps 500 \
     --use_pretrained \
     --model_name meta-llama/Llama-3.2-1B \
     --run_name "pt" \

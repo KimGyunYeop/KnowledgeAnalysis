@@ -34,7 +34,7 @@ def parse_args():
     parser.add_argument("--template_path", type=str, default="bio_templates.json", help="Path to the templates JSON file")
     parser.add_argument("--output_dir", type=str, default="results", help="Directory to save the model")
     parser.add_argument("--num_eval_data", type=int, default=10000, help="Number of evaluation data points")
-    parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for training")
     parser.add_argument("--num_steps", type=int, default=100000, help="Number of training epochs")
     # parser.add_argument("--accumulation_steps", type=int, default=1, help="Number of steps for gradient accumulation")
     parser.add_argument("--eval_batch_size", type=int, default=32, help="Batch size for evaluation")
@@ -66,7 +66,6 @@ def parse_args():
 def main():
     args = parse_args()
     
-    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
 
     if args.use_pretrained:
         args.output_dir = os.path.join(args.output_dir, args.model_name)
@@ -99,7 +98,7 @@ def main():
     tokenizer.add_special_tokens({"additional_special_tokens":["[X]", "[Y]"]})  # Add special tokens for placeholders
     
     if args.use_pretrained:
-        model = AutoModelForCausalLM.from_pretrained(args.model_name)
+        model = AutoModelForCausalLM.from_pretrained(args.model_name, device_map="auto")
         print(f"load pretrained model from {args.model_name}")
     else:
         config = AutoConfig.from_pretrained(args.model_name)
@@ -116,10 +115,11 @@ def main():
         print(f"make new model from scratch")
         
     model.resize_token_embeddings(len(tokenizer))  # Resize token embeddings to match tokenizer size
-    model.to(device)
-    if "llama" in args.model_name.lower():
-        print("Enable gradient checkpointing")
-        model.gradient_checkpointing_enable()
+    # device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+    # model.to(device)
+    # if "llama" in args.model_name.lower():
+    #     print("Enable gradient checkpointing")
+    #     model.gradient_checkpointing_enable()
 
     train_dataset = RandomBioDataset(
         data_path=args.data_path,
