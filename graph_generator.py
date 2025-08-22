@@ -33,8 +33,8 @@ for st in split_type:
         plt.figure(figsize=(6, 6))
         plt.xlabel('pre-train Attribute Loss')
         plt.ylabel('fine-tune Attribute Loss')
-        plt.xscale('log')  # x축을 로그 스케일로 설정
-        plt.yscale('log')  # y축을 로그 스케일로 설정
+        # plt.xscale('log')  # x축을 로그 스케일로 설정
+        # plt.yscale('log')  # y축을 로그 스케일로 설정
         plt.title(f'Knowledge Collapse - split by {st}')
         plt.plot(list(base_original_test_loss.values())[1:], list(base_test_loss.values())[1:], label="base")
         

@@ -1,7 +1,7 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, GPT2LMHeadModel, GPT2Tokenizer, GPT2Config
 import transformers
 
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset, Subset, ConcatDataset
 import torch
 
 from tqdm import tqdm
@@ -14,8 +14,8 @@ import os
 import argparse
 
 from tqdm import tqdm
-
-ATTRIBUTE_LIST = ["birth_date", "birth_place", "university", "major", "company", "location"]
+from utils import ATTRIBUTE_LIST 
+from dataset import RandomBioDataset
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a plain transformer model for knowledge analysis")
@@ -23,11 +23,16 @@ def parse_args():
     parser.add_argument("--run_name", type=str, default="test", help="Name of the run for logging purposes")
 
     parser.add_argument("--use_entropy_loss", action="store_true", default=False, help="Use entropy loss")
+    parser.add_argument("--mix_augmented_prefixed_data", action="store_true", default=False, help="Mix prefixed data")
+    parser.add_argument("--prefix_mode", type=str, default="repeat", choices=["repeat", "metadata"], help="Prefix mode")
+    
+    # use pretrained model
+    parser.add_argument("--use_pretrained", action="store_true", help="Whether to use a pretrained model")
 
     parser.add_argument("--model_name", type=str, default="gpt2", help="Pretrained model name or path")
     parser.add_argument("--data_path", type=str, default="data/bio_data_100000_42.json", help="Path to the training data")
     parser.add_argument("--template_path", type=str, default="bio_templates.json", help="Path to the templates JSON file")
-    parser.add_argument("--output_dir", type=str, default="results/plain_transformer", help="Directory to save the model")
+    parser.add_argument("--output_dir", type=str, default="results", help="Directory to save the model")
     parser.add_argument("--num_eval_data", type=int, default=10000, help="Number of evaluation data points")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--num_steps", type=int, default=100000, help="Number of training epochs")
@@ -53,121 +58,32 @@ def parse_args():
     parser.add_argument("--key_size", type=int, default=64, help="Dimension of the key and values")
     parser.add_argument("--sequence_mixer", type=str, default="attention", choices=["attention", "mlp"], help="Which sequence mixing block to use")
     parser.add_argument("--max_len", type=int, default=512, help="Maximum sequence length for the model")
-    
+
+
     return parser.parse_args()
 
-class RandomBioDataset(Dataset):
-    def __init__(self, data_path, template_path, tokenizer, mode="train"):
-        with open(data_path, 'r') as f:
-            self.data = json.load(f)
-            
-        with open(template_path, 'r') as f:
-            self.templates = json.load(f)
-            
-        self.tokenizer = tokenizer
-        
-        self.len_temp = len(self.data[0]["train_tamplates"]["birth_date_template"])
-        
-        if mode == "train":
-            self.temp_mask = 0
-            self.use_temp_num = sum(self.data[0]["train_tamplates"]["birth_date_template"])
-        elif mode == "test":
-            self.temp_mask = 1
-            self.use_temp_num = self.len_temp - sum(self.data[0]["train_tamplates"]["birth_date_template"])
-            
-        self.name_holder = tokenizer.convert_tokens_to_ids("[X]")
-        self.value_holder = tokenizer.convert_tokens_to_ids("[Y]")
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        item = self.data[idx]
-        name = item['name']
-        
-        shuffled_attributes = ATTRIBUTE_LIST.copy()
-        random.shuffle(shuffled_attributes)
-        
-        attr_values = []
-        use_templates = []
-        for attr in shuffled_attributes:
-            attr_values.append(item[attr])
-            while True:
-                template_index = random.randint(0, self.len_temp - 1)
-                if item["train_tamplates"][f"{attr}_template"][template_index] == self.temp_mask:
-                    use_templates.append(self.templates[f"{attr}_template"][template_index])
-                    break
-                
-        template = " ".join(use_templates)
-        
-        tokens = self.tokenizer(template)
-        # print("before decoded input_ids:", self.tokenizer.convert_ids_to_tokens(tokens.input_ids))
-        
-        name_tokens = self.tokenizer(name, add_special_tokens=False)
-        name_indices = []
-        value_indices = []
-        len_name_tokens = len(name_tokens.input_ids)
-        for value in attr_values:
-            attr_tokens = self.tokenizer(value, add_special_tokens=False)
-            
-            name_index = tokens.input_ids.index(self.name_holder)
-            tokens.input_ids = tokens.input_ids[:name_index] + name_tokens.input_ids + tokens.input_ids[name_index + 1:]
-            tokens.attention_mask = tokens.attention_mask[:name_index] + name_tokens.attention_mask + tokens.attention_mask[name_index + 1:]
-            
-            name_indices.append([name_index, name_index + len_name_tokens])
-            
-            value_index = tokens.input_ids.index(self.value_holder)
-            len_value_tokens = len(attr_tokens.input_ids)
-            tokens.input_ids = tokens.input_ids[:value_index] + attr_tokens.input_ids + tokens.input_ids[value_index + 1:]
-            tokens.attention_mask = tokens.attention_mask[:value_index] + attr_tokens.attention_mask + tokens.attention_mask[value_index + 1:]
-            
-            value_indices.append([value_index, value_index + len_value_tokens])
-        
-        name_mask = torch.zeros(len(tokens.input_ids), dtype=torch.long)
-        value_mask = torch.zeros(len(tokens.input_ids), dtype=torch.long)
-        
-        for i, (start, end) in enumerate(name_indices):
-            name_mask[start:end] = i + 1
-        
-        for i, (start, end) in enumerate(value_indices):
-            value_mask[start:end] = i + 1
-            
-        input_ids = torch.tensor(tokens.input_ids, dtype=torch.long)
-        attention_mask = torch.tensor(tokens.attention_mask, dtype=torch.long)
-        
-        # print("after decoded input_ids:", self.tokenizer.convert_ids_to_tokens(input_ids))
-        
-        # print("only name tokens:", self.tokenizer.decode(input_ids[name_mask == 1]))
-        # print("only value tokens:", self.tokenizer.decode(input_ids[value_mask == 1]))
-            
-        return {"input_ids": input_ids, "attention_mask": attention_mask, "name_mask": name_mask, "value_mask": value_mask}
-
-    def collate_fn(self, batch):
-        input_ids = [item["input_ids"] for item in batch]
-        attention_mask = [item["attention_mask"] for item in batch]
-        name_mask = [item["name_mask"] for item in batch]
-        value_mask = [item["value_mask"] for item in batch]
-        
-        input_ids = torch.nn.utils.rnn.pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
-        attention_mask = torch.nn.utils.rnn.pad_sequence(attention_mask, batch_first=True, padding_value=0)
-        name_mask = torch.nn.utils.rnn.pad_sequence(name_mask, batch_first=True, padding_value=0)
-        value_mask = torch.nn.utils.rnn.pad_sequence(value_mask, batch_first=True, padding_value=0)
-        
-        return {"input_ids": input_ids, "attention_mask": attention_mask, "name_mask": name_mask, "value_mask": value_mask}
     
 def main():
     args = parse_args()
     
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
-    
+
+    if args.use_pretrained:
+        args.output_dir = os.path.join(args.output_dir, args.model_name)
+    else:
+        args.output_dir = os.path.join(args.output_dir, "plain_transformer")
+
     if args.model_type == "transformer":
         model_run_name = f"transformer_step{args.num_steps}_d{args.d_model}_d_hidden{args.d_hidden}_n_layers{args.n_layers}_n_heads{args.n_heads}"
 
     args.run_name = f"{args.run_name}_{args.data_path.split('/')[-1].split('.')[0]}_{model_run_name}"
     
     if args.use_entropy_loss:
-        model_run_name += "_entropy"
-    
+        args.run_name += "_entropy"
+
+    if args.mix_augmented_prefixed_data:
+        args.run_name += f"_mix_augmented_{args.prefix_mode}"
+
     os.makedirs(os.path.join(args.output_dir, args.run_name), exist_ok=True)
     
     torch.manual_seed(args.seed)
@@ -182,7 +98,10 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token  # Set pad token to eos token for GPT-2 compatibility
     tokenizer.add_special_tokens({"additional_special_tokens":["[X]", "[Y]"]})  # Add special tokens for placeholders
     
-    if args.model_type == "transformer":
+    if args.use_pretrained:
+        model = AutoModelForCausalLM.from_pretrained(args.model_name)
+        print(f"load pretrained model from {args.model_name}")
+    else:
         config = AutoConfig.from_pretrained(args.model_name)
         config.n_layer = args.n_layers
         config.n_head = args.n_heads
@@ -194,9 +113,10 @@ def main():
         config.sequence_mixer = args.sequence_mixer
         
         model = GPT2LMHeadModel(config)
-        model.resize_token_embeddings(len(tokenizer))  # Resize token embeddings to match tokenizer size
+        print(f"make new model from scratch")
         
-        model.to(device)
+    model.resize_token_embeddings(len(tokenizer))  # Resize token embeddings to match tokenizer size
+    model.to(device)
     
     train_dataset = RandomBioDataset(
         data_path=args.data_path,
@@ -204,15 +124,28 @@ def main():
         tokenizer=tokenizer,
         mode="train"
     )
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=train_dataset.collate_fn)
+    print(f"Using original training data with {len(train_dataset)} samples.")
+    if args.mix_augmented_prefixed_data:
+        augmented_prefix_train_dataset = RandomBioDataset(
+            data_path=args.data_path,
+            template_path=args.template_path,
+            tokenizer=tokenizer,
+            mode="train",
+            add_augmented_prefix=True,
+            prefix_mode=args.prefix_mode
+        )
+        train_dataset = ConcatDataset([train_dataset, augmented_prefix_train_dataset])
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=augmented_prefix_train_dataset.collate_fn)
+        print(f"Using augmented prefix training data with {len(augmented_prefix_train_dataset)} samples. all dataset size: {len(train_dataset)}")
+
     test_dataset = RandomBioDataset(
         data_path=args.data_path,
         template_path=args.template_path,
         tokenizer=tokenizer,
         mode="test"
     )
-    
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=train_dataset.collate_fn)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=train_dataset.collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=test_dataset.collate_fn)
     # only evaluate on 16k samples
     indices = torch.randperm(len(test_dataset))[:args.num_eval_data]
     test_loader = DataLoader(Subset(test_dataset, indices), batch_size=args.eval_batch_size, shuffle=False, collate_fn=test_dataset.collate_fn)

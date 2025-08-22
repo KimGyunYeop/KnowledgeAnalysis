@@ -15,8 +15,8 @@ import os
 import argparse
 
 from tqdm import tqdm
-
-ATTRIBUTE_LIST = ["birth_date", "birth_place", "university", "major", "company", "location"]
+from utils import ATTRIBUTE_LIST 
+from dataset import RandomBioDataset
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a plain transformer model for knowledge analysis")
@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="gpt2", help="Pretrained model name or path")
     parser.add_argument("--data_path", type=str, default="data/bio_data_30000_42_other_1764.json", help="Path to the training data")
     parser.add_argument("--template_path", type=str, default="bio_templates.json", help="Path to the templates JSON file")
-    parser.add_argument("--output_dir", type=str, default="results_ft/plain_transformer", help="Directory to save the model")
+    parser.add_argument("--output_dir", type=str, default="results_ft", help="Directory to save the model")
     parser.add_argument("--num_train_data", type=int, default=10000, help="Number of training data points")
     parser.add_argument("--num_eval_data", type=int, default=10000, help="Number of evaluation data points")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
@@ -62,108 +62,6 @@ def parse_args():
     
     return parser.parse_args()
 
-class RandomBioDataset(Dataset):
-    def __init__(self, data_path, template_path, tokenizer, mode="train"):
-        if type(data_path) is str:
-            with open(data_path, 'r') as f:
-                self.data = json.load(f)
-        elif type(data_path) is list:
-            self.data = data_path
-            
-        with open(template_path, 'r') as f:
-            self.templates = json.load(f)
-            
-        self.tokenizer = tokenizer
-        
-        self.len_temp = len(self.data[0]["train_tamplates"]["birth_date_template"])
-        
-        if mode == "train":
-            self.temp_mask = 0
-            self.use_temp_num = sum(self.data[0]["train_tamplates"]["birth_date_template"])
-        elif mode == "test":
-            self.temp_mask = 1
-            self.use_temp_num = self.len_temp - sum(self.data[0]["train_tamplates"]["birth_date_template"])
-            
-        self.name_holder = tokenizer.convert_tokens_to_ids("[X]")
-        self.value_holder = tokenizer.convert_tokens_to_ids("[Y]")
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        item = self.data[idx]
-        name = item['name']
-        
-        shuffled_attributes = ATTRIBUTE_LIST.copy()
-        random.shuffle(shuffled_attributes)
-        
-        attr_values = []
-        use_templates = []
-        for attr in shuffled_attributes:
-            attr_values.append(item[attr])
-            while True:
-                template_index = random.randint(0, self.len_temp - 1)
-                if item["train_tamplates"][f"{attr}_template"][template_index] == self.temp_mask:
-                    use_templates.append(self.templates[f"{attr}_template"][template_index])
-                    break
-                
-        template = " ".join(use_templates)
-        
-        tokens = self.tokenizer(template)
-        # print("before decoded input_ids:", self.tokenizer.convert_ids_to_tokens(tokens.input_ids))
-        
-        name_tokens = self.tokenizer(name, add_special_tokens=False)
-        name_indices = []
-        value_indices = []
-        len_name_tokens = len(name_tokens.input_ids)
-        for value in attr_values:
-            attr_tokens = self.tokenizer(value, add_special_tokens=False)
-            
-            name_index = tokens.input_ids.index(self.name_holder)
-            tokens.input_ids = tokens.input_ids[:name_index] + name_tokens.input_ids + tokens.input_ids[name_index + 1:]
-            tokens.attention_mask = tokens.attention_mask[:name_index] + name_tokens.attention_mask + tokens.attention_mask[name_index + 1:]
-            
-            name_indices.append([name_index, name_index + len_name_tokens])
-            
-            value_index = tokens.input_ids.index(self.value_holder)
-            len_value_tokens = len(attr_tokens.input_ids)
-            tokens.input_ids = tokens.input_ids[:value_index] + attr_tokens.input_ids + tokens.input_ids[value_index + 1:]
-            tokens.attention_mask = tokens.attention_mask[:value_index] + attr_tokens.attention_mask + tokens.attention_mask[value_index + 1:]
-            
-            value_indices.append([value_index, value_index + len_value_tokens])
-        
-        name_mask = torch.zeros(len(tokens.input_ids), dtype=torch.long)
-        value_mask = torch.zeros(len(tokens.input_ids), dtype=torch.long)
-        
-        for i, (start, end) in enumerate(name_indices):
-            name_mask[start:end] = i + 1
-        
-        for i, (start, end) in enumerate(value_indices):
-            value_mask[start:end] = i + 1
-            
-        input_ids = torch.tensor(tokens.input_ids, dtype=torch.long)
-        attention_mask = torch.tensor(tokens.attention_mask, dtype=torch.long)
-        
-        # print("after decoded input_ids:", self.tokenizer.convert_ids_to_tokens(input_ids))
-        
-        # print("only name tokens:", self.tokenizer.decode(input_ids[name_mask == 1]))
-        # print("only value tokens:", self.tokenizer.decode(input_ids[value_mask == 1]))
-            
-        return {"input_ids": input_ids, "attention_mask": attention_mask, "name_mask": name_mask, "value_mask": value_mask}
-
-    def collate_fn(self, batch):
-        input_ids = [item["input_ids"] for item in batch]
-        attention_mask = [item["attention_mask"] for item in batch]
-        name_mask = [item["name_mask"] for item in batch]
-        value_mask = [item["value_mask"] for item in batch]
-        
-        input_ids = torch.nn.utils.rnn.pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
-        attention_mask = torch.nn.utils.rnn.pad_sequence(attention_mask, batch_first=True, padding_value=0)
-        name_mask = torch.nn.utils.rnn.pad_sequence(name_mask, batch_first=True, padding_value=0)
-        value_mask = torch.nn.utils.rnn.pad_sequence(value_mask, batch_first=True, padding_value=0)
-        
-        return {"input_ids": input_ids, "attention_mask": attention_mask, "name_mask": name_mask, "value_mask": value_mask}
-    
 def data_split_by_attr_loss(args, model, tokenizer):
     test_dataset = RandomBioDataset(
         data_path=args.data_path,
@@ -270,6 +168,11 @@ def main():
     args = parse_args()
     args.original_target_file = args.data_path.replace("_other"+args.data_path.split("_other")[-1], ".json")
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+    
+    if "plain_transformer" in args.checkpoint_path:
+        args.output_dir = os.path.join(args.output_dir, "plain_transformer")
+    elif "gpt2" in args.checkpoint_path:
+        args.output_dir = os.path.join(args.output_dir, "gpt2")
     
     model_run_name = f"{args.checkpoint_path.split('/')[-1]}"
     
