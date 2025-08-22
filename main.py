@@ -18,7 +18,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from utils import ATTRIBUTE_LIST 
 from dataset import RandomBioDataset
-from train_fn import train
+from train_fn import train, train_with_soft_prompt
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a plain transformer model for knowledge analysis")
@@ -31,13 +31,15 @@ def parse_args():
     parser.add_argument("--knowledge_deleting_finish_strategy", type=str, default="step", choices=["step", "max_value"], help="Method to delete knowledge from the model")
     parser.add_argument("--knowledge_deleting_steps", type=int, default=5000, help="Number of steps to delete knowledge")
     parser.add_argument("--knowledge_deleting_max_value", type=float, default=0.1, help="Maximum value to delete knowledge")
-    parser.add_argument("--knowledge_deleting_use_kl", action="store_true", default=False, help="Whether to use KL divergence for knowledge deletion")
 
     parser.add_argument("--current_prob_based_loss", action="store_true", default=False, help="Whether to use current probability-based loss")
     
     # augmented train add_augmented_prefix=False, prefix_mode="repeat"
     parser.add_argument("--add_augmented_prefix", action="store_true", default=False, help="Whether to add augmented prefix")
     parser.add_argument("--prefix_mode", type=str, default="repeat", choices=["repeat", "metadata"], help="Prefix mode")
+    
+    parser.add_argument("--use_soft_prompt", action="store_true", default=False, help="Whether to use soft prompt for training")
+    parser.add_argument("--use_kl", action="store_true", default=False, help="Whether to use KL divergence for knowledge deletion")
 
     # pre_trained data adding
     parser.add_argument("--add_pretrained_data", action="store_true", help="Whether to add pretrained data to the training set")
@@ -155,9 +157,15 @@ def main():
         random.shuffle(repeated_data)  # Shuffle the data after combining
         print(f"expand pretrained data to {len(repeated_data)} samples by original data length {len(original_data)}")
 
-        train(args, model, tokenizer, repeated_data, data, args.original_target_file, mode="train")
+        if args.use_soft_prompt:
+            train_with_soft_prompt(args, model, tokenizer, repeated_data, data, args.original_target_file, mode="train")
+        else:
+            train(args, model, tokenizer, repeated_data, data, args.original_target_file, mode="train")
     else:
-        train(args, model, tokenizer, data, data, args.original_target_file, mode="train")
+        if args.use_soft_prompt:
+            train_with_soft_prompt(args, model, tokenizer, data, data, args.original_target_file, mode="train")
+        else:
+            train(args, model, tokenizer, data, data, args.original_target_file, mode="train")
 
     # train_dataset = RandomBioDataset(
     #     data_path=data if not args.add_pretrained_data else repeated_data,
