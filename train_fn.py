@@ -91,13 +91,16 @@ def train(args, model, tokenizer, train_data, test_data, original_data=None, mod
         add_augmented_prefix=args.add_augmented_prefix,
         prefix_mode=args.prefix_mode
     )
-    # tmp_train_dataset = RandomBioDataset(
-    #     data_path=train_data,
-    #     template_path=args.template_path,
-    #     tokenizer=tokenizer,
-    #     mode="train",
-    # )
-    # train_dataset = ConcatDataset([train_dataset, tmp_train_dataset])
+    if args.mix_augmented_prefixed_data:
+        tmp_train_dataset = RandomBioDataset(
+            data_path=train_data,
+            template_path=args.template_path,
+            tokenizer=tokenizer,
+            mode="train",
+            add_augmented_prefix= not args.add_augmented_prefix,
+            prefix_mode=args.prefix_mode
+        )
+        train_dataset = ConcatDataset([train_dataset, tmp_train_dataset])
     test_dataset = RandomBioDataset(
         data_path=test_data,
         template_path=args.template_path,
@@ -542,13 +545,16 @@ def train_with_soft_prompt(args, model, tokenizer, train_data, test_data, origin
         add_augmented_prefix=args.add_augmented_prefix,
         prefix_mode=args.prefix_mode
     )
-    # tmp_train_dataset = RandomBioDataset(
-    #     data_path=train_data,
-    #     template_path=args.template_path,
-    #     tokenizer=tokenizer,
-    #     mode="train",
-    # )
-    # train_dataset = ConcatDataset([train_dataset, tmp_train_dataset])
+    if args.mix_augmented_prefixed_data:
+        tmp_train_dataset = RandomBioDataset(
+            data_path=train_data,
+            template_path=args.template_path,
+            tokenizer=tokenizer,
+            mode="train",
+            add_augmented_prefix= not args.add_augmented_prefix,
+            prefix_mode=args.prefix_mode
+        )
+        train_dataset = ConcatDataset([train_dataset, tmp_train_dataset])
     test_dataset = RandomBioDataset(
         data_path=test_data,
         template_path=args.template_path,

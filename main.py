@@ -37,7 +37,8 @@ def parse_args():
     # augmented train add_augmented_prefix=False, prefix_mode="repeat"
     parser.add_argument("--add_augmented_prefix", action="store_true", default=False, help="Whether to add augmented prefix")
     parser.add_argument("--prefix_mode", type=str, default="repeat", choices=["repeat", "metadata"], help="Prefix mode")
-    
+    parser.add_argument("--mix_augmented_prefixed_data", action="store_true", default=False, help="Whether to mix augmented data")
+
     parser.add_argument("--use_soft_prompt", action="store_true", default=False, help="Whether to use soft prompt for training")
     parser.add_argument("--use_kl", action="store_true", default=False, help="Whether to use KL divergence for knowledge deletion")
 
@@ -95,7 +96,9 @@ def main():
     if args.add_pretrained_data:
         args.run_name += f"_p_pretrained_data_{args.p_pretrained_data}"
         
-    if args.add_augmented_prefix:
+    if args.mix_augmented_prefixed_data:
+        args.run_name += f"_proposed_mix_ap-{args.prefix_mode}"
+    elif args.add_augmented_prefix:
         args.run_name += f"_proposed_ap-{args.prefix_mode}"
 
     if args.knowledge_deleting or args.current_prob_based_loss:
