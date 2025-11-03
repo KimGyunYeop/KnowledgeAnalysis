@@ -1,0 +1,9 @@
+*.out
+*.json
+!bio_templates.json
+raw_dataset/*
+output/*
+result*
+logs*
+data/*
+figure*
